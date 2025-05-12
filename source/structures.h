@@ -1,29 +1,25 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
 #include "common.h"
 
 typedef int16_t SFFSFatEnt;
 
 enum {
-    SFFS_MAGIC    = 0x53464653, // 'SFFS'
+    NAND_PAGE_SIZE  = 0x800, // 2KiB
+    NAND_SPARE_SIZE = 0x40,  // 64B
+    NAND_HMAC_SIZE  = 0x20,  // 32B
+    NAND_PAGE_SPARE = (NAND_PAGE_SIZE + NAND_SPARE_SIZE),
 
-    SFFS_CLUSTER_SIZE = 0x4000,
+    NAND_BLOCK_SIZE      = 0x20000, // 128KiB
+    NAND_PAGES_PER_BLOCK = (NAND_BLOCK_SIZE / NAND_PAGE_SIZE),
+    NAND_BLOCK_SPARE     = (NAND_PAGE_SPARE * NAND_PAGES_PER_BLOCK),
 
-    SFFS_FAT_ERASED   = 0xFFFF, // ?
-    SFFS_FAT_FREE     = 0xFFFE,
-    SFFS_FAT_BAD      = 0xFFFD,
-    SFFS_FAT_RESERVED = 0xFFFC,
-    SFFS_FAT_EOF      = 0xFFFB,
-
-    SFFS_FAT_MAX  = 0x8000,
-
-    SFFS_FST_TYPE_FREE = 0,
-    SFFS_FST_TYPE_FILE = 1,
-    SFFS_FST_TYPE_DIR  = 2,
-    SFFS_FST_EOF       = 0xFFFF,
-
-    SFFS_FST_MAX  = 0x17FF,
+    NAND_SIZE            = 0x20000000, // 512MiB
+    NAND_BLOCK_COUNT     = (NAND_SIZE / NAND_BLOCK_SIZE),
+    NAND_PAGE_COUNT      = (NAND_BLOCK_COUNT * NAND_PAGES_PER_BLOCK),
+    NAND_SIZE_SPARE      = (NAND_BLOCK_SPARE * NAND_BLOCK_COUNT),
 };
 
 typedef struct SFFSFstEnt {
@@ -57,36 +53,56 @@ typedef union {
 } SFFSSaltData;
 CHECK_STRUCT_SIZE(SFFSSaltData, 0x40);
 
-typedef struct SFFSSuperblock {
+typedef struct SFFSSuperblockHeader {
     uint32_t magic;
     uint32_t iteration;
     uint32_t generation;
+} SFFSSuperblockHeader;
+CHECK_STRUCT_SIZE(SFFSSuperblockHeader, 0xC);
 
-    SFFSFatEnt fat[SFFS_FAT_MAX];
-    SFFSFstEnt fst[SFFS_FST_MAX];
-    uint8_t    padding[0x14];
-} __attribute__((packed)) SFFSSuperblock;
-CHECK_STRUCT_SIZE(SFFSSuperblock, 0x40000);
-
-///
+#define SUPERBLOCK_FAT(x) ((SFFSFatEnt *)((uintptr_t)x + sizeof(SFFSSuperblockHeader)))
+#define SUPERBLOCK_FST(x) ((SFFSFstEnt *)&SUPERBLOCK_FAT(x)[SFFS_FAT_MAX])
 
 enum {
-   NAND_PAGE_SIZE  = 0x800,
-   NAND_SPARE_SIZE = 0x40,
-   NAND_PAGE_SPARE = (NAND_PAGE_SIZE + NAND_SPARE_SIZE),
+    SFFS_MAGIC    = 0x53464653, // 'SFFS'
 
-   NAND_PAGES_PER_BLOCK = 0x40,
-   NAND_BLOCK_SIZE      = (NAND_PAGE_SIZE * NAND_PAGES_PER_BLOCK),
-   NAND_BLOCK_SPARE     = (NAND_PAGE_SPARE * NAND_PAGES_PER_BLOCK),
+    SFFS_CLUSTER_SIZE = 0x4000, // 16KiB
+    SFFS_SUPERBLOCK_SIZE = 0x40000, // 256KiB
 
-   NAND_BLOCK_COUNT     = 0x1000,
-   NAND_PAGE_COUNT      = (NAND_BLOCK_COUNT * NAND_PAGES_PER_BLOCK),
-   NAND_SIZE            = (NAND_BLOCK_SIZE * NAND_BLOCK_COUNT),
-   NAND_SIZE_SPARE      = (NAND_BLOCK_SPARE * NAND_BLOCK_COUNT),
+    SFFS_PAGES_PER_CLUSTER  = (SFFS_CLUSTER_SIZE / NAND_PAGE_SIZE),
+    SFFS_CLUSTERS_PER_BLOCK = (NAND_BLOCK_SIZE / SFFS_CLUSTER_SIZE),
 
-   SFFS_PAGES_PER_CLUSTER  = (SFFS_CLUSTER_SIZE / NAND_PAGE_SIZE),
-   SFFS_CLUSTERS_PER_BLOCK = (SFFS_CLUSTER_SIZE / NAND_BLOCK_SIZE),
+    SFFS_FAT_ERASED   = 0xFFFF, // ?
+    SFFS_FAT_FREE     = 0xFFFE,
+    SFFS_FAT_BAD      = 0xFFFD,
+    SFFS_FAT_RESERVED = 0xFFFC,
+    SFFS_FAT_EOF      = 0xFFFB,
+
+    SFFS_FAT_RSVD_LO  = (0x100000 / SFFS_CLUSTER_SIZE),
+    SFFS_FAT_RSVD_HI  = ((NAND_SIZE - (SFFS_SUPERBLOCK_SIZE * 16)) / SFFS_CLUSTER_SIZE),
+    SFFS_FAT_MAX      = (NAND_SIZE / SFFS_CLUSTER_SIZE),
+
+    SFFS_FST_TYPE_FREE = 0,
+    SFFS_FST_TYPE_FILE = 1,
+    SFFS_FST_TYPE_DIR  = 2,
+    SFFS_FST_EOF       = 0xFFFF,
+
+    SFFS_FST_MAX  = ((SFFSFstEnt *)SFFS_SUPERBLOCK_SIZE - SUPERBLOCK_FST(0x0)),
 };
+
+_Static_assert(SFFS_FST_MAX == 0x17FF, "?");
+
+typedef union SFFSSuperblock {
+    struct {
+        SFFSSuperblockHeader header;
+        SFFSFatEnt           fat[SFFS_FAT_MAX];
+        SFFSFstEnt           fst[SFFS_FST_MAX];
+    };
+    uint8_t data[SFFS_SUPERBLOCK_SIZE];
+} SFFSSuperblock;
+
+_Static_assert((uintptr_t)SUPERBLOCK_FST(0x0) == 0x1000C, "?");
+CHECK_STRUCT_SIZE(SFFSSuperblock, SFFS_SUPERBLOCK_SIZE);
 
 ///
 

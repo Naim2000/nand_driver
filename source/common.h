@@ -7,3 +7,17 @@
 
 #define debug_printf(level, fmt, ...) { fprintf(stderr, "%s:%d: %s(): " fmt "\n", __FILE__, __LINE__, __PRETTY_FUNCTION__, ##__VA_ARGS__); }
 #define my_assert(cond) { if (!(cond)) { debug_printf(-1, "assertion failed (" #cond ")"); abort(); } }
+
+static inline void hexdump(const char * title, const void * x, size_t len) {
+    puts(title);
+
+    const uint8_t* data = x;
+    for (int i = 0; i < len; i++) {
+        printf(" %02X", data[i]);
+
+    if ((i+1) % 16 == 0 || i + 1 >= len)
+        putchar('\n');
+    else if ((i+1) % 4 == 0)
+        printf(" |");
+    }
+}
