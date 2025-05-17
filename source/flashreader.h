@@ -16,9 +16,25 @@ typedef struct NandHandle {
     SFFSSuperblock* superblock;
 } NandHandle;
 
-int  Nand_Init(NandHandle*, const char* filepath, const char* keys_path);
-void Nand_Close(NandHandle*);
+int     Nand_Init(NandHandle*, const char* filepath, const char* keys_path);
+void    Nand_Close(NandHandle*);
 
-int  Nand_ReadPages(NandHandle*, unsigned page, unsigned count, unsigned char *data, bool spare);
-int  Nand_ReadClusters(NandHandle*, unsigned start, unsigned count, int flags, unsigned char* iv, unsigned char* salt, unsigned salt_len, unsigned char* data);
-int  Nand_PickSuperblock(NandHandle* handle);
+int     Nand_ReadPages(NandHandle*, unsigned page, unsigned count, unsigned char* data, bool spare);
+int     Nand_ReadClusters(NandHandle*, unsigned start, unsigned count, int flags, const unsigned char* iv, const unsigned char* salt, unsigned salt_len, unsigned char* data);
+int     Nand_PickSuperblock(NandHandle*);
+int     Nand_FindInode(NandHandle*, const char* path);
+
+typedef struct NandFile {
+    int            ret;
+    unsigned       inode;
+    uint32_t       fpos;
+    uint32_t       fsize;
+    SFFSFatEnt*    cltbl;
+    unsigned       nclust; // *
+
+    unsigned char* buffer;
+    uint32_t       buffer_offset;
+} NandFile;
+
+int Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp);
+int Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned char* data, unsigned offset, unsigned len);

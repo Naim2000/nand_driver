@@ -22,12 +22,14 @@ enum {
     NAND_SIZE_SPARE      = (NAND_BLOCK_SPARE * NAND_BLOCK_COUNT),
 };
 
+enum {
+    SFFS_FST_MAXNAMELEN = 12,
+    SFFS_FST_MAXPATHLEN = 64,
+};
+
 typedef struct SFFSFstEnt {
-    char     filename[12];
-    uint8_t  owner_perm: 2;
-    uint8_t  group_perm: 2;
-    uint8_t  other_perm: 2;
-    uint8_t  type: 2;
+    char     filename[SFFS_FST_MAXNAMELEN];
+    uint8_t  mode;
     uint8_t  attributes;
     union {
         SFFSFatEnt sclust;
@@ -40,13 +42,14 @@ typedef struct SFFSFstEnt {
     uint32_t generation;
 } __attribute__((packed)) SFFSFstEnt;
 CHECK_STRUCT_SIZE(SFFSFstEnt, 0x20);
+_Static_assert(offsetof(SFFSFstEnt, mode) == 0xC, "?");
 
 typedef union {
     struct {
         uint32_t uid;
-        char     filename[12];
+        char     filename[SFFS_FST_MAXNAMELEN];
         uint32_t cluster;
-        uint32_t fst_pos;
+        uint32_t inode;
         uint32_t generation;
     } __attribute__((packed));
     uint8_t data[0x40];
@@ -82,6 +85,7 @@ enum {
     SFFS_FAT_RSVD_HI  = ((NAND_SIZE - (SFFS_SUPERBLOCK_SIZE * 16)) / SFFS_CLUSTER_SIZE),
     SFFS_FAT_MAX      = (NAND_SIZE / SFFS_CLUSTER_SIZE),
 
+    SFFS_FST_TYPE_MASK = 3,
     SFFS_FST_TYPE_FREE = 0,
     SFFS_FST_TYPE_FILE = 1,
     SFFS_FST_TYPE_DIR  = 2,
