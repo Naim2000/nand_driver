@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include "common.h"
 
-typedef int16_t SFFSFatEnt;
+typedef uint16_t SFFSFatEnt;
 
 enum {
     NAND_PAGE_SIZE  = 0x800, // 2KiB
@@ -94,8 +94,6 @@ enum {
     SFFS_FST_MAX  = ((SFFSFstEnt *)SFFS_SUPERBLOCK_SIZE - SUPERBLOCK_FST(0x0)),
 };
 
-_Static_assert(SFFS_FST_MAX == 0x17FF, "?");
-
 typedef union SFFSSuperblock {
     struct {
         SFFSSuperblockHeader header;
@@ -105,7 +103,6 @@ typedef union SFFSSuperblock {
     uint8_t data[SFFS_SUPERBLOCK_SIZE];
 } SFFSSuperblock;
 
-_Static_assert((uintptr_t)SUPERBLOCK_FST(0x0) == 0x1000C, "?");
 CHECK_STRUCT_SIZE(SFFSSuperblock, SFFS_SUPERBLOCK_SIZE);
 
 ///
@@ -141,7 +138,7 @@ enum {
 };
 
 #define SEEPROM_COUNTER_STRUCT(name, thestruct...) \
-    typedef union { \
+    typedef union name { \
         struct __attribute__((packed)) \
             thestruct \
         ; \

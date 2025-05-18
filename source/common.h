@@ -15,9 +15,9 @@ static inline void hexdump(const char * title, const void * x, size_t len) {
     for (int i = 0; i < len; i++) {
         printf(" %02X", data[i]);
 
-    if ((i+1) % 16 == 0 || i + 1 >= len)
-        putchar('\n');
-    else if ((i+1) % 4 == 0)
-        printf(" |");
+        if ((i+1) % 16 == 0 || i + 1 >= len)
+            putchar('\n');
+        else if ((i+1) % 4 == 0)
+            printf(" |");
     }
 }
