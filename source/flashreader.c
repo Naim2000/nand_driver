@@ -7,16 +7,11 @@
 #include <mbedtls/md.h>
 
 #include "flashreader.h"
-#include "common.h"
-#include "structures.h"
-
-#define printf_err(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
-#define puts_err(s) fputs(s, stderr)
 
 static SFFSSaltData _Nand_GetSalt(NandHandle* handle, unsigned inode, uint32_t i);
 static unsigned char* _Nand_GetSaltIV(SFFSSaltData* salt, unsigned char out[0x10]);
 
-int Nand_Init(NandHandle* handle, const char* filepath, const char* keys_filepath) {
+int Nand_Init(NandHandle* handle, const char* filepath) {
     if (!handle || !filepath)
         return -EINVAL;
 
@@ -30,49 +25,35 @@ int Nand_Init(NandHandle* handle, const char* filepath, const char* keys_filepat
 
     fseek(handle->fp, 0, SEEK_END);
     handle->filesize = (size_t)ftell(handle->fp);
-    debug_printf(3, "handle->filesize = %#zx", handle->filesize);
     fseek(handle->fp, 0, SEEK_SET);
 
-    if (handle->filesize != NAND_SIZE_SPARE && handle->filesize != (NAND_SIZE_SPARE + sizeof(KeysBin))) {
+    if (handle->filesize == (NAND_SIZE_SPARE + sizeof(KeysBin))) {
+        fseek(handle->fp, NAND_SIZE_SPARE, SEEK_SET);
+        fread(&handle->keys, sizeof(KeysBin), 1, handle->fp);
+        handle->has_keys = true;
+    } else if (handle->filesize != NAND_SIZE_SPARE) {
         debug_printf(0, "This doesn't seem like a NAND backup");
         Nand_Close(handle);
         return -EINVAL;
     }
 
-    KeysBin* keys = malloc(sizeof *keys);
-    my_assert(keys != NULL);
+    return 0;
+}
 
-    if (handle->filesize == (NAND_SIZE_SPARE + sizeof(KeysBin))) {
-        fseek(handle->fp, NAND_SIZE_SPARE, SEEK_SET);
-        fread(keys, sizeof(KeysBin), 1, handle->fp);
-        handle->has_keys = true;
-    }
-    else if (keys_filepath != NULL) {
-        FILE* fp = fopen(keys_filepath, "rb");
-        if (!fp) {
-            perror(keys_filepath);
-            Nand_Close(handle);
-            return -errno;
-        }
+int Nand_ImportKeys(NandHandle* handle, const char* keys_filepath) {
+    if (!handle || !keys_filepath)
+        return -EINVAL;
 
-        fread(keys, sizeof(KeysBin), 1, fp);
-        fclose(fp);
-        handle->has_keys = true;
-    } else {
-        handle->has_keys = false;
-    };
-
-    if (handle->has_keys) {
-        debug_printf(3, "we got keys!\n%s", keys->comment);
-        memcpy(handle->boot1_hash,      keys->otp.boot1_hash,      sizeof(handle->boot1_hash));
-        memcpy(handle->common_key,      keys->otp.common_key,      sizeof(handle->common_key));
-        memcpy(handle->nandfs_aes_key,  keys->otp.nandfs_key,      sizeof(handle->nandfs_aes_key));
-        memcpy(handle->nandfs_hmac_key, keys->otp.nandfs_hmac_key, sizeof(handle->nandfs_hmac_key));
+    FILE* fp = fopen(keys_filepath, "rb");
+    if (!fp) {
+        int _errno = errno;
+        debug_printf(0, "%s: %s", keys_filepath, strerror(_errno));
+        return -_errno;
     }
 
-    free(keys);
-    keys = NULL;
-
+    fread(&handle->keys, sizeof(KeysBin), 1, fp);
+    fclose(fp);
+    handle->has_keys = true;
     return 0;
 }
 
@@ -80,15 +61,12 @@ void Nand_Close(NandHandle* handle) {
     if (!handle)
         return;
 
-    if (handle->fp != NULL) {
+    if (handle->fp != NULL)
         fclose(handle->fp);
-        handle->fp = NULL;
-    }
 
-    if (handle->superblock != NULL) {
-        free(handle->superblock);
-        handle->superblock = NULL;
-    }
+    free(handle->superblock);
+
+    memset(handle, 0, sizeof *handle);
 }
 
 static void calc_ecc(unsigned char *data, unsigned char ecc[4])
@@ -131,7 +109,7 @@ static void calc_ecc(unsigned char *data, unsigned char ecc[4])
 
 int check_page(unsigned char *page)
 {
-    unsigned char *spare        = page + NAND_PAGE_SIZE;
+    unsigned char *spare = page + NAND_PAGE_SIZE;
 
     if (spare[0] != 0xFF)
         return -13;
@@ -142,12 +120,13 @@ int check_page(unsigned char *page)
         unsigned char (*ecc_read)[4] = (unsigned char (*)[4])(spare + NAND_SPARE_SIZE - 0x10);
         unsigned char   ecc_calc[4];
 
-        if (memcmp(ecc_read[i], (unsigned char[4]){0xFF, 0xFF, 0xFF, 0xFF}, sizeof ecc_read[i]) == 0) // Erased
-            continue;
-
         calc_ecc(ecc_data[i], ecc_calc);
         if (memcmp(ecc_read[i], ecc_calc, sizeof ecc_calc) == 0) // Good
             continue;
+
+        if (memcmp(ecc_read[i], (unsigned char[4]){0xFF, 0xFF, 0xFF, 0xFF}, sizeof ecc_read[i]) == 0) { // Erased
+            continue;
+        }
 
         debug_printf(1, "ECC error detected (%i), can't solve it rn", i);
         debug_printf(1, "ecc_read: %02X%02X%02X%02X\n", ecc_read[i][0], ecc_read[i][1], ecc_read[i][2], ecc_read[i][3]);
@@ -171,7 +150,7 @@ static bool _Nand_ValidHandle(NandHandle* handle, bool fs) {
         return false;
     }
 
-    if (fs && !handle->superblock && Nand_PickSuperblock(handle) != 0) {
+    if (fs && (!handle->superblock && Nand_PickSuperblock(handle) != 0)) {
         debug_printf(0, "Failed to initialize filesystem");
         return false;
     }
@@ -230,7 +209,7 @@ int Nand_ReadClusters(NandHandle* handle, unsigned start, unsigned count, int fl
         return -EINVAL;
     }
 
-    if(start + count > SFFS_FAT_MAX) {
+    if (start + count > SFFS_FAT_MAX) {
         debug_printf(0, "cluster is out of bounds (%#x+%#x > %#x)", start, count, SFFS_FAT_MAX);
         return -EINVAL;
     }
@@ -242,19 +221,19 @@ int Nand_ReadClusters(NandHandle* handle, unsigned start, unsigned count, int fl
     mbedtls_aes_context  aes;
     mbedtls_md_context_t ctx;
     unsigned char iv_buffer[0x10];
-    unsigned char hmac_buffer[0x40];
+    unsigned char hmac_buffer[0x40] = {};
     unsigned char hmac_digest[0x14];
 
     if (flags & 1) {
         mbedtls_aes_init(&aes);
-        mbedtls_aes_setkey_dec(&aes, handle->nandfs_aes_key, 128);
+        mbedtls_aes_setkey_dec(&aes, (const unsigned char *)handle->keys.otp.nandfs_key, 128);
         memcpy(iv_buffer, iv, sizeof iv_buffer);
     }
 
     if (flags & 2) {
         mbedtls_md_init(&ctx);
         mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), true);
-        mbedtls_md_hmac_starts(&ctx, handle->nandfs_hmac_key, sizeof handle->nandfs_hmac_key);
+        mbedtls_md_hmac_starts(&ctx, (const unsigned char *)handle->keys.otp.nandfs_hmac_key, sizeof handle->keys.otp.nandfs_hmac_key);
         mbedtls_md_hmac_update(&ctx, salt, salt_len);
     }
 
@@ -273,28 +252,29 @@ int Nand_ReadClusters(NandHandle* handle, unsigned start, unsigned count, int fl
 
             if (flags & 2)
                 mbedtls_md_hmac_update(&ctx, out, NAND_PAGE_SIZE);
+
+            int n_hmac = (sizeof hmac_buffer / NAND_HMAC_SIZE);
+            int k = SFFS_PAGES_PER_CLUSTER - j;
+            if (k <= n_hmac)
+                memcpy(hmac_buffer + sizeof hmac_buffer - (k * NAND_HMAC_SIZE), buffer[j] + NAND_PAGE_SIZE + 1, NAND_HMAC_SIZE);
         }
     }
 
 
     if (flags & 2) {
-        for (unsigned i = (sizeof hmac_buffer / NAND_HMAC_SIZE); i; i--) {
-            // Last cluster is sitting in buffer.
-            memcpy(hmac_buffer + sizeof hmac_buffer - (i * NAND_HMAC_SIZE), buffer[SFFS_PAGES_PER_CLUSTER - i] + NAND_PAGE_SIZE + 1, NAND_HMAC_SIZE);
-        }
         // hexdump("HMAC buffer", hmac_buffer, sizeof hmac_buffer);
 
         mbedtls_md_hmac_finish(&ctx, hmac_digest);
-
         if (memcmp(hmac_digest, hmac_buffer + 0, sizeof hmac_digest) != 0) {
             debug_printf(2, "HMAC #0 mismatch");
             if (memcmp(hmac_digest, hmac_buffer + 0x14, sizeof hmac_digest) != 0) {
-                ret = -116;
                 debug_printf(2, "HMAC #1 mismatch")
-                debug_printf(0, "HMAC verification failed");
                 if (memcmp(hmac_buffer + 0, hmac_buffer + 0x14, sizeof hmac_digest) != 0) {
                     debug_printf(0, "HMAC #0 and #1 do not match each other");
                     ret = -114;
+                } else {
+                    debug_printf(0, "HMAC verification failed");
+                    ret = -116;
                 }
             }
         }
@@ -335,6 +315,7 @@ int Nand_PickSuperblock(NandHandle* handle) {
             continue;
         }
 
+        debug_printf(3, "Superblock %i: iter=%08x, generation=%08x", i, be32toh(superblock->header.iteration), be32toh(superblock->header.generation));
         if (be32toh(superblock->header.iteration) > superblock_iter) {
             superblock_idx = i;
             superblock_iter = be32toh(superblock->header.iteration);
@@ -364,12 +345,12 @@ int Nand_PickSuperblock(NandHandle* handle) {
     return ret;
 }
 
-int Nand_StatFilesystem(NandHandle* handle, SFFSStats* out) {
+int Nand_StatFilesystem(NandHandle* handle, NandFSStats* out) {
     if (!_Nand_ValidHandle(handle, true))
         return -EINVAL;
 
     SFFSSuperblock* superblock = handle->superblock;
-    SFFSStats st = {};
+    NandFSStats st = {};
 
     // Clusters
     st.cluster_size = SFFS_CLUSTER_SIZE;
@@ -391,11 +372,11 @@ int Nand_StatFilesystem(NandHandle* handle, SFFSStats* out) {
         } else {
             st.used_clusters++;
             if (x == i) {
-                debug_printf(0, "Filesystem insanity: cluster %#06x points to itself", i);
+                debug_printf(2, "Filesystem insanity: cluster %#06x points to itself", i);
             } else if (x < SFFS_FAT_RSVD_LO) {
-                debug_printf(0, "Filesystem insanity: cluster %#06x points down to the boot region (%#06x < %#06x)", i, x, SFFS_FAT_RSVD_LO);
+                debug_printf(2, "Filesystem insanity: cluster %#06x points down to the boot region (%#06x < %#06x)", i, x, SFFS_FAT_RSVD_LO);
             } else if (x >= SFFS_FAT_RSVD_HI) {
-                debug_printf(0, "Cluster %#06x points into the metadata area? (%#06x >= %#06x)", i, x, SFFS_FAT_RSVD_HI);
+                debug_printf(2, "Cluster %#06x points into the metadata area? (%#06x >= %#06x)", i, x, SFFS_FAT_RSVD_HI);
             }
         }
     }
@@ -410,31 +391,29 @@ int Nand_StatFilesystem(NandHandle* handle, SFFSStats* out) {
             case SFFS_FST_TYPE_FREE:
                 st.free_inodes++;
                 break;
-
-            default:
-                debug_printf(0, "Filesystem insanity: inode %#06x has invalid mode %#04x", i, entry->mode);
-                break;
             case SFFS_FST_TYPE_FILE:
                 total_files_size += be32toh(entry->filesize);
             case SFFS_FST_TYPE_DIR:
                 st.used_inodes++;
                 break;
 
-
+            default:
+                debug_printf(2, "Filesystem insanity: inode %#06x has invalid mode %#04x. who signed this superblock?", i, entry->mode);
+                break;
         }
     }
 
-    debug_printf(2, "Filesystem stats: iteration=%08x, generation=%08x", be32toh(superblock->header.iteration), be32toh(superblock->header.generation));
-    debug_printf(2, "Free clusters:     %#06x (%u)", st.free_clusters, st.free_clusters);
-    debug_printf(2, "Used clusters:     %#06x (%u)", st.used_clusters, st.used_clusters);
-    debug_printf(2, "Bad clusters:      %#06x (%u)", st.bad_clusters, st.bad_clusters);
-    debug_printf(2, "Reserved clusters: %#06x (%u)", st.reserved_clusters, st.reserved_clusters);
-    debug_printf(2, "\"Erased\" clusters: %#06x (%u)", st.erased_clusters, st.erased_clusters);
-    debug_printf(2, "Free inodes:       %#06x (%u)", st.free_inodes, st.free_inodes);
-    debug_printf(2, "Used inodes:       %#06x (%u)", st.used_inodes, st.used_inodes);
-    debug_printf(2, "Total files size:  %uKiB (%#x)", total_files_size >> 10, total_files_size);
+    debug_printf(1, "Filesystem stats:  iteration=%08x, generation=%08x", be32toh(superblock->header.iteration), be32toh(superblock->header.generation));
+    debug_printf(1, "Free clusters:     %#06x (%u)", st.free_clusters, st.free_clusters);
+    debug_printf(1, "Used clusters:     %#06x (%u)", st.used_clusters, st.used_clusters);
+    debug_printf(1, "Bad clusters:      %#06x (%u)", st.bad_clusters, st.bad_clusters);
+    debug_printf(1, "Reserved clusters: %#06x (%u)", st.reserved_clusters, st.reserved_clusters);
+    debug_printf(1, "\"Erased\" clusters: %#06x (%u)", st.erased_clusters, st.erased_clusters);
+    debug_printf(1, "Free inodes:       %#06x (%u)", st.free_inodes, st.free_inodes);
+    debug_printf(1, "Used inodes:       %#06x (%u)", st.used_inodes, st.used_inodes);
+    debug_printf(1, "Total files size:  %uKiB (%#x)", total_files_size >> 10, total_files_size);
     unsigned overhead = (st.used_clusters * st.cluster_size) - total_files_size;
-    debug_printf(2, "Cluster overhead:  %uKiB (%#x)", overhead >> 10, overhead);
+    debug_printf(1, "Cluster overhead:  %uKiB (%#x)", overhead >> 10, overhead);
 
     if (out)
         *out = st;
@@ -449,24 +428,25 @@ int Nand_FindInode(NandHandle* handle, unsigned inode, const char* path) {
     int nlen = strlen(path);
 
     SFFSFstEnt* fst = handle->superblock->fst;
-    const char* ptr = path;
-    while (*ptr && ptr - path < nlen) {
+    int x = 0;
+    while (path[x] && x < nlen) {
+        const char* ptr = path + x;
         SFFSFstEnt* entry = &fst[inode];
 
         int ilen = strcspn(ptr, "/");
         if (ilen > SFFS_FST_MAXNAMELEN) {
-            debug_printf(2, "Item '%.*s' in /%s is too long", ilen, ptr, path);
+            debug_printf(0, "Item '%.*s' in /%s is too long", ilen, ptr, path);
             return SFFS_FST_EOF; // return -101;
         }
 
         if ((entry->mode & SFFS_FST_TYPE_MASK) != SFFS_FST_TYPE_DIR) {
-            debug_printf(2, "Trying to look for item '%.*s' in a file /%.*s", ilen, ptr, (int)(ptr - path - 1), path);
+            debug_printf(0, "Trying to look for item '%.*s' in a file /%.*s", ilen, ptr, x - 1, path);
             return SFFS_FST_EOF;
         }
 
         for (inode = be16toh(entry->child); inode != SFFS_FST_EOF; inode = be16toh(fst[inode].sibling)) {
             if (inode >= SFFS_FST_MAX) {
-                debug_printf(0, "Invalid inode# %#06x in directory. who signed this superblock?", inode);
+                debug_printf(1, "Invalid inode# %#06x in directory. who signed this superblock?", inode);
                 return SFFS_FST_EOF; // return -103;
             }
 
@@ -475,11 +455,11 @@ int Nand_FindInode(NandHandle* handle, unsigned inode, const char* path) {
         }
 
         if (inode == SFFS_FST_EOF) {
-            debug_printf(2, "Could not find '%.*s' under /%.*s", ilen, ptr, (int)(ptr - path), path);
+            debug_printf(0, "Could not find '%.*s' under /%.*s", ilen, ptr, x, path);
             break;
         }
 
-        ptr += ilen + 1;
+        x += ilen + 1;
     }
 
     return inode;
@@ -505,7 +485,39 @@ int Nand_FindPath(NandHandle* handle, const char* path) {
     return Nand_FindInode(handle, 0x0, path + 1);
 }
 
-int Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp) {
+int Nand_StatInode(NandHandle* handle, unsigned inode, NandFileStat* st) {
+   if (!_Nand_ValidHandle(handle, true) || !st)
+        return -EINVAL;
+
+    if (inode == SFFS_FST_EOF) {
+        debug_printf(0, "Trying to open nothing");
+        return -106;
+    }
+
+    if (inode >= SFFS_FST_MAX) {
+        debug_printf(0, "Inode %#x is out of bounds (>=%#x)", inode, SFFS_FST_MAX);
+        return -101;
+    }
+
+    SFFSFstEnt* entry = &handle->superblock->fst[inode];
+    if ((entry->mode & SFFS_FST_TYPE_MASK) == SFFS_FST_TYPE_FREE) {
+        debug_printf(1, "Inode %u has been deleted", inode);
+        return -106;
+    }
+
+    memset(st, 0, sizeof *st);
+    strncpy(st->name, entry->filename, SFFS_FST_MAXNAMELEN);
+    st->inode    = inode;
+    st->type     = entry->mode & SFFS_FST_TYPE_MASK;
+    st->mode     = entry->mode >> 2;
+    st->uid      = be32toh(entry->uid);
+    st->gid      = be16toh(entry->gid);
+    st->filesize = be32toh(entry->filesize);
+
+    return 0;
+}
+
+int Nand_OpenFileInode(NandHandle* handle, unsigned inode, NandFile* fp) {
     if (!_Nand_ValidHandle(handle, true) || !fp)
         return -EINVAL;
 
@@ -523,7 +535,7 @@ int Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp) {
 
     SFFSFstEnt* entry = &handle->superblock->fst[inode];
     if ((entry->mode & SFFS_FST_TYPE_MASK) == SFFS_FST_TYPE_FREE) {
-        debug_printf(1, "File '%.*s has been deleted", SFFS_FST_MAXNAMELEN, entry->filename);
+        debug_printf(1, "Inode %u has been deleted", inode);
         return -106;
     }
 
@@ -538,7 +550,7 @@ int Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp) {
     my_assert(fp->cltbl != NULL);
 
     int i = 0;
-    for (SFFSFatEnt fat = be16toh(entry->sclust); fat != SFFS_FAT_EOF && i < fp->nclust; fat = be16toh(handle->superblock->fat[fat]), i++) {
+    for (SFFSFatEnt fat = be16toh(entry->sclust); i < fp->nclust && fat != SFFS_FAT_EOF; fat = be16toh(handle->superblock->fat[fat]), i++) {
         if (fat < SFFS_FAT_RSVD_LO || fat >= SFFS_FAT_MAX) {
             debug_printf(0, "Invalid cluster entry in chain (%#x) for file '%.*s'. who signed this superblock?", fat, SFFS_FST_MAXNAMELEN, entry->filename);
             return -103;
@@ -549,8 +561,13 @@ int Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp) {
     }
 
     if (i != fp->nclust) {
-        debug_printf(0, "cluster chain too short? (fsize=%#x, nclust=%u, i=%u)", fp->fsize, fp->nclust, i);
+        debug_printf(1, "cluster chain too short? (fsize=%#x, nclust=%u, i=%u)", fp->fsize, fp->nclust, i);
         return -103;
+    }
+
+    SFFSFatEnt lclust = be16toh(handle->superblock->fat[fp->nclust]);
+    if (lclust < SFFS_FAT_EOF) {
+        debug_printf(2, "cluster chain too long? (fsize=%#x, nclust=%u, i=%u %04hX)", fp->fsize, fp->nclust, i, lclust);
     }
 
     fp->inode         = inode;
@@ -560,6 +577,10 @@ int Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp) {
     my_assert(fp->buffer != NULL);
 
     return 0;
+}
+
+int Nand_OpenFile(NandHandle* handle, const char* path, NandFile* fp) {
+    return Nand_OpenFileInode(handle, Nand_FindPath(handle, path), fp);
 }
 
 void Nand_CloseFile(NandHandle* handle, NandFile* fp) {
@@ -596,7 +617,7 @@ static unsigned char* _Nand_GetSaltIV(SFFSSaltData* salt, unsigned char out[0x10
     return out;
 }
 
-int Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned char* data, unsigned offset, unsigned len) {
+int Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned offset, unsigned char* data, unsigned len) {
     if (!_Nand_ValidHandle(handle, true) || !fp)
         return -EINVAL;
 
@@ -604,21 +625,20 @@ int Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned char* data, unsign
     if (ret != 0)
         return ret;
 
-    unsigned left = len;
     unsigned progress = 0;
     if (offset + len > fp->fsize)
-        left = fp->fsize - offset;
+        len = fp->fsize - offset;
 
-    while (left) {
+    while (len) {
         if (fp->buffer_offset != -1 && (offset & -SFFS_CLUSTER_SIZE) == fp->buffer_offset) {
             unsigned read = SFFS_CLUSTER_SIZE;
-            if (progress + read > len)
+            if ((progress + read) > len)
                 read = len - progress;
 
             memcpy(data + progress, fp->buffer + offset - fp->buffer_offset, read);
             progress += read;
             offset += read;
-            left -= read;
+            len -= read;
             continue;
         }
 
@@ -635,7 +655,51 @@ int Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned char* data, unsign
     return (fp->ret = ret) ?: progress;
 }
 
-int Nand_OpenDir(NandHandle* handle, unsigned inode, NandDirectory* dirp) {
+int Nand_ReadFile(NandHandle* handle, NandFile* fp, unsigned char* data, unsigned len) {
+    if (!_Nand_ValidHandle(handle, true) || !fp)
+        return -EINVAL;
+
+    int ret = fp->ret;
+    if (ret == 0) {
+        ret = Nand_ReadFileA(handle, fp, fp->fpos, data, len);
+        if (ret >= 0)
+            fp->fpos += ret;
+    }
+
+    return ret;
+}
+
+int Nand_SeekFile(NandHandle* handle, NandFile* fp, int where, int whence) {
+    if (!_Nand_ValidHandle(handle, true) || !fp)
+        return -EINVAL;
+
+    int start;
+    switch (whence) {
+        case SEEK_SET:
+            start = 0;
+            break;
+
+        case SEEK_CUR:
+            start = fp->fpos;
+            break;
+
+        case SEEK_END:
+            start = fp->fsize;
+            break;
+
+        default:
+            return -101;
+    }
+
+    start += where;
+    if (start > fp->fsize)
+        return -101;
+
+    fp->fpos = start;
+    return 0;
+}
+
+int Nand_OpenDirInode(NandHandle* handle, unsigned inode, NandDirectory* dirp) {
     if (!_Nand_ValidHandle(handle, true) || !dirp)
         return -EINVAL;
 
@@ -653,7 +717,7 @@ int Nand_OpenDir(NandHandle* handle, unsigned inode, NandDirectory* dirp) {
 
     SFFSFstEnt* entry = &handle->superblock->fst[inode];
     if ((entry->mode & SFFS_FST_TYPE_MASK) == SFFS_FST_TYPE_FREE) {
-        debug_printf(1, "File '%.*s has been deleted", SFFS_FST_MAXNAMELEN, entry->filename);
+        debug_printf(1, "Inode %u has been deleted", inode);
         return -106;
     }
 
@@ -668,28 +732,26 @@ int Nand_OpenDir(NandHandle* handle, unsigned inode, NandDirectory* dirp) {
     return 0;
 }
 
-NandDirEnt* Nand_ReadDir(NandHandle* handle, NandDirectory* dirp) {
+int Nand_OpenDir(NandHandle* handle, const char* dirpath, NandDirectory* dirp) {
+    return Nand_OpenDirInode(handle, Nand_FindPath(handle, dirpath), dirp);
+}
+
+NandDirEnt* Nand_ReadDir(NandHandle* handle, NandDirectory* dirp, NandDirEnt* pent) {
     if (!_Nand_ValidHandle(handle, true) || !dirp)
         return NULL;
 
     if (dirp->cur == SFFS_FST_EOF)
         return NULL;
 
-    SFFSFstEnt* entry = &handle->superblock->fst[dirp->cur];
-    NandDirEnt* pent = &dirp->buf;
+    if (!pent)
+        pent = &dirp->buf;
 
-    memset(pent, 0, sizeof *pent);
-    strncpy(pent->name, entry->filename, SFFS_FST_MAXNAMELEN);
-    pent->inode    = dirp->cur;
-    pent->type     = entry->mode & SFFS_FST_TYPE_MASK;
-    pent->mode     = entry->mode >> 2;
-    pent->uid      = be32toh(entry->uid);
-    pent->gid      = be16toh(entry->gid);
-    pent->filesize = be32toh(entry->filesize);
+    if (Nand_StatInode(handle, dirp->cur, pent) == 0) {
+        dirp->cur = be16toh(handle->superblock->fst[dirp->cur].sibling);
+        return pent;
+    }
 
-    dirp->cur = be16toh(handle->superblock->fst[dirp->cur].sibling);
-
-    return pent;
+    return NULL;
 }
 
 void Nand_RewindDir(NandHandle* handle, NandDirectory* dirp) {

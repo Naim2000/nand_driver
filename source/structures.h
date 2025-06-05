@@ -9,6 +9,7 @@ typedef uint16_t SFFSFatEnt;
 enum {
     NAND_PAGE_SIZE  = 0x800, // 2KiB
     NAND_SPARE_SIZE = 0x40,  // 64B
+    /* Weird name. This is more like a general miscellaneous data area in the spare pages. Clusters will store a total of 64 bytes in the last N pages, by default this is 2 copies of an HMAC */
     NAND_HMAC_SIZE  = 0x20,  // 32B
     NAND_PAGE_SPARE = (NAND_PAGE_SIZE + NAND_SPARE_SIZE),
 
@@ -138,12 +139,16 @@ enum {
 };
 
 #define SEEPROM_COUNTER_STRUCT(name, thestruct...) \
+    struct __attribute__((packed)) __s_##name \
+        thestruct \
+    ; \
+    \
     typedef union name { \
         struct __attribute__((packed)) \
             thestruct \
         ; \
         struct { \
-            uint16_t sumdata[(sizeof(struct __attribute__((packed)) thestruct)) / 2]; \
+            uint16_t sumdata[(sizeof(struct __s_##name)) / 2]; \
             uint16_t checksum; \
         }; \
     } name ;

@@ -4,33 +4,29 @@
 typedef struct NandHandle {
     FILE*           fp;
     size_t          filesize;
-    int             has_keys: 1;
+    int             has_keys;
 
-    // uint32_t        bad_block_map[NAND_BLOCK_COUNT / 32];
-
-    uint8_t         boot1_hash[20];
-    uint8_t         common_key[16];
-    uint8_t         nandfs_aes_key[16];
-    uint8_t         nandfs_hmac_key[20];
+    KeysBin         keys;
 
     SFFSSuperblock* superblock;
 } NandHandle;
 
-int     Nand_Init(NandHandle* handle, const char* filepath, const char* keys_path);
+int     Nand_Init(NandHandle* handle, const char* filepath);
 void    Nand_Close(NandHandle* handle);
+int     Nand_ImportKeys(NandHandle* handle, const char* keys_filepath);
 
 int     Nand_ReadPages(NandHandle* handle, unsigned page, unsigned count, unsigned char* data, bool spare);
 int     Nand_ReadClusters(NandHandle* handle, unsigned start, unsigned count, int flags, const unsigned char* iv, const unsigned char* salt, unsigned salt_len, unsigned char* data);
-int     Nand_PickSuperblock(NandHandle* handle);
 
-typedef struct SFFSStats {
+typedef struct NandFSStats {
     unsigned cluster_size;
     unsigned used_clusters, free_clusters, bad_clusters, reserved_clusters, erased_clusters /* ?? */;
     unsigned used_inodes, free_inodes;
     unsigned total_files_size;
-} SFFSStats;
+} NandFSStats;
 
-int     Nand_StatFilesystem(NandHandle* handle, SFFSStats* out);
+int     Nand_PickSuperblock(NandHandle* handle);
+int     Nand_StatFilesystem(NandHandle* handle, NandFSStats* out);
 
 int     Nand_FindInode(NandHandle* handle, unsigned inode, const char* path);
 int     Nand_FindPath(NandHandle* handle, const char* path);
@@ -38,20 +34,23 @@ int     Nand_FindPath(NandHandle* handle, const char* path);
 typedef struct NandFile {
     int            ret;
     unsigned       inode;
-    uint32_t       fpos;
-    uint32_t       fsize;
+    unsigned       fpos;
+    unsigned       fsize;
     SFFSFatEnt*    cltbl;
     unsigned       nclust; // *
 
     unsigned char* buffer;
-    uint32_t       buffer_offset;
+    unsigned       buffer_offset;
 } NandFile;
 
-int   Nand_OpenInode(NandHandle* handle, unsigned inode, NandFile* fp);
-void  Nand_CloseFile(NandHandle* handle, NandFile* fp);
-int   Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned char* data, unsigned offset, unsigned len);
+int     Nand_OpenFileInode(NandHandle* handle, unsigned inode, NandFile* fp);
+int     Nand_OpenFile(NandHandle* handle, const char* path, NandFile* fp);
+void    Nand_CloseFile(NandHandle* handle, NandFile* fp);
+int     Nand_ReadFileA(NandHandle* handle, NandFile* fp, unsigned offset, unsigned char* data, unsigned len);
+int     Nand_ReadFile(NandHandle* handle, NandFile* fp, unsigned char* data, unsigned len);
+int     Nand_SeekFile(NandHandle* handle, NandFile* fp, int where, int whence);
 
-typedef struct NandDirEnt {
+typedef struct NandFileStat {
     char      name[SFFS_FST_MAXNAMELEN + 1];
     unsigned  inode;
     int       type;
@@ -59,7 +58,7 @@ typedef struct NandDirEnt {
     uint32_t  uid;
     uint16_t  gid;
     unsigned  filesize;
-} NandDirEnt;
+} NandFileStat, NandDirEnt;
 
 typedef struct NandDirectory {
     unsigned   inode;
@@ -67,6 +66,8 @@ typedef struct NandDirectory {
     NandDirEnt buf;
 } NandDirectory;
 
-int         Nand_OpenDir(NandHandle* handle, unsigned inode, NandDirectory* dirp);
-NandDirEnt* Nand_ReadDir(NandHandle* handle, NandDirectory* dirp);
+int         Nand_StatInode(NandHandle* handle, unsigned inode, NandFileStat* st);
+int         Nand_OpenDirInode(NandHandle* handle, unsigned inode, NandDirectory* dirp);
+int         Nand_OpenDir(NandHandle* handle, const char* dirpath, NandDirectory* dirp);
+NandDirEnt* Nand_ReadDir(NandHandle* handle, NandDirectory* dirp, NandDirEnt* pent);
 void        Nand_RewindDir(NandHandle* handle, NandDirectory* dirp);
